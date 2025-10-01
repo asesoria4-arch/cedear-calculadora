@@ -1,6 +1,6 @@
 # ============================================================
 # Calculadora CEDEARs - Streamlit App (parser híbrido pdfminer + PyMuPDF)
-# Autor: Diego + Asistente
+# Autor: Diego + Asistente IA
 # Última actualización: 2025-10-01
 # ============================================================
 
@@ -37,7 +37,6 @@ div[data-baseweb="input"] input { font-size: 1.05rem !important; }
 }
 .result-card h3 { margin-top: 0; margin-bottom: 10px; color: #000; }
 .result-highlight { font-size: 1.25rem; font-weight: 700; color: #000; }
-.badge { display:inline-block; padding:4px 10px; border-radius:10px; background:#eef; border:1px solid #99c; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -58,7 +57,7 @@ STOPWORDS = {
     "CEDEAR","CEDEARS","BYMA","BOLSAS","MERCADOS","ARGENTINOS","RATIO",
     "VALOR","SUBYACENTE","ISIN","CUSIP","NASDAQ","NYSE","LSE","AMEX",
     "USD","ARS","ETF","SEDE","ACCION","EMPRESA","SECTOR","INDEX",
-    "TABLE","PAGE","VOL","ADR","RATIO:","CED","PROGRAMAS",
+    "TABLE","PAGE","VOL","ADR","PROGRAMAS",
     "ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO",
     "AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"
 }
@@ -271,6 +270,11 @@ if len(st.session_state["hist"]) == 0:
     st.info("Todavía no hay cálculos en esta sesión.")
 else:
     df = pd.DataFrame(st.session_state["hist"])
+
+    # Fix: convertir TS a naive datetime (Excel no acepta tz-aware)
+    if "TS" in df.columns:
+        df["TS"] = pd.to_datetime(df["TS"]).dt.tz_localize(None)
+
     st.dataframe(df, use_container_width=True)
 
     buffer = io.BytesIO()
