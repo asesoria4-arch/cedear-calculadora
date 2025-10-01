@@ -3,4 +3,5 @@ yfinance>=0.2.40
 pandas>=2.0
 requests>=2.31
 pdfminer.six>=20221105
+pymupdf>=1.23.20
 openpyxl>=3.1
