@@ -1,5 +1,5 @@
 # ============================================================
-# Calculadora CEDEARs - Streamlit App
+# Calculadora CEDEARs - Streamlit App (parser híbrido pdfminer + PyMuPDF)
 # Autor: Diego + Asistente
 # Última actualización: 2025-10-01
 # ============================================================
@@ -7,19 +7,23 @@
 import io
 import re
 import time
+import json
 import hashlib
 import requests
 import pandas as pd
 import yfinance as yf
 import streamlit as st
-from pdfminer.high_level import extract_text
+
+# Backends de extracción de texto
+from pdfminer.high_level import extract_text as pdfminer_extract_text
+import fitz  # PyMuPDF
 
 # --------------------------
 # Configuración general
 # --------------------------
 st.set_page_config(page_title="Calculadora CEDEARs", page_icon="💱", layout="centered")
 
-# CSS para tipografías negras y tarjeta más grande
+# CSS (texto negro, tarjeta grande)
 st.markdown("""
 <style>
 html, body, [class*="css"]  { color: #000 !important; }
@@ -27,16 +31,12 @@ label, .stTextInput label { font-size: 1.05rem !important; color: #000 !importan
 div[data-baseweb="input"] input { font-size: 1.05rem !important; }
 .stButton>button { font-size: 1.05rem; padding: 0.6rem 1.1rem; }
 .result-card {
-  border: 2px solid #333;
-  border-radius: 12px;
-  padding: 16px 18px;
-  background: #ffffff;
-  font-size: 1.05rem;
-  line-height: 1.6;
-  color: #000000;
+  border: 2px solid #333; border-radius: 12px; padding: 16px 18px;
+  background: #ffffff; font-size: 1.05rem; line-height: 1.6; color: #000000;
 }
 .result-card h3 { margin-top: 0; margin-bottom: 10px; color: #000; }
 .result-highlight { font-size: 1.25rem; font-weight: 700; color: #000; }
+.badge { display:inline-block; padding:4px 10px; border-radius:10px; background:#eef; border:1px solid #99c; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -53,49 +53,118 @@ DOLAR_CCL_URL = "https://dolarapi.com/v1/dolares/contadoconliqui"
 # --------------------------
 # Utilidades
 # --------------------------
+STOPWORDS = {
+    "CEDEAR", "CEDEARS", "BYMA", "BOLSAS", "MERCADOS", "ARGENTINOS", "RATIO",
+    "VALOR", "SUBYACENTE", "ISIN", "CUSIP", "NASDAQ", "NYSE", "LSE", "AMEX",
+    "USD", "ARS", "ETF", "SEDE", "ACCION", "EMPRESA", "SECTOR", "INDEX",
+    "TABLE", "PAGE", "VOL", "CUSPID", "ADR", "RATIO:", "CED", "PROGRAMAS",
+    "BOLSASY", "MERCADOSARGENTINOS", "DE", "LA", "EL", "EN", "SUBYACENTE:",
+    "RATIOCEDEAR/VALORSUBYACENTE", "RATIOCEDEAR", "VALORSUBYACENTE",
+    # meses / días frecuentes en PDFs
+    "ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE",
+    "MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"
+}
+
 def fmt(x, nd=2):
     try:
         return f"{float(x):,.{nd}f}"
     except Exception:
         return "0.00"
 
-def fetch_bytes_from_url(url: str, timeout=20) -> bytes:
+def fetch_bytes_from_url(url: str, timeout=25) -> bytes:
     r = requests.get(url, timeout=timeout, allow_redirects=True)
     r.raise_for_status()
     return r.content
 
-def parse_ratios_from_pdf_bytes(pdf_bytes: bytes) -> dict:
-    """
-    Extrae texto del PDF (pdfminer.six) y obtiene {ticker: ratio_int}.
-    Parser robusto: normaliza espacios y busca patrones ticker + ratio (ej: 20:1).
-    """
-    text = extract_text(io.BytesIO(pdf_bytes)) or ""
+# ------------ Extracción de texto (2 backends) ------------
+def extract_text_pdfminer(pdf_bytes: bytes) -> str:
+    try:
+        return pdfminer_extract_text(io.BytesIO(pdf_bytes)) or ""
+    except Exception:
+        return ""
+
+def extract_text_pymupdf(pdf_bytes: bytes) -> str:
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        chunks = []
+        for page in doc:
+            # "text" conserva orden "de lectura"; "blocks" a veces ayuda, pero empezamos simple
+            chunks.append(page.get_text("text"))
+        doc.close()
+        return "\n".join(chunks)
+    except Exception:
+        return ""
+
+# ------------ Heurísticas de parseo de ratios ------------
+TICKER_RE = re.compile(r"^[A-Z]{1,6}(?:\.[A-Z]{1,2})?$")  # AAPL, F, BRK.B
+RATIO_RE = re.compile(r"^(\d{1,3}):1$")
+
+def is_ticker_token(tok: str) -> bool:
+    if not TICKER_RE.match(tok):
+        return False
+    if tok in STOPWORDS:
+        return False
+    return True
+
+def normalize_text(text: str) -> str:
     text = text.replace("\n", " ")
     text = re.sub(r"\s+", " ", text)
+    return text
 
+def parse_ratios_from_text(text: str) -> dict:
+    text = normalize_text(text)
     ratios = {}
 
-    # 1) Intento directo: ticker seguido de ratio
-    matches = re.findall(r"\b([A-Z0-9\.]{1,6})\b[^:]{0,50}?(\d+):1", text)
-    for tk, r in matches:
-        ratios[tk.strip()] = int(r)
+    # 1) Match directo: <TICKER> ... <d+:1>
+    direct = re.findall(r"\b([A-Z0-9\.]{1,6})\b[^:]{0,60}?(\d{1,3}:1)", text)
+    for tk, rx in direct:
+        # limpiar ticker (por si viene con coma/punto final)
+        tk = re.sub(r"[^A-Z\.]", "", tk)
+        if is_ticker_token(tk):
+            r = int(rx.split(":")[0])
+            ratios[tk] = r
 
-    # 2) Emparejador robusto si capturó poco
-    if len(ratios) < 50:
-        tokens = re.findall(r"([A-Z0-9]{1,6}|\d+:1)", text)
+    # 2) Fallback: emparejar tokens (ticker → primer ratio siguiente)
+    if len(ratios) < 100:  # si capturó poco, aplicamos fallback
+        tokens = re.findall(r"[A-Z0-9\.]{1,10}|\d{1,3}:1", text)
         last_ticker = None
-        for t in tokens:
-            if re.fullmatch(r"[A-Z0-9]{1,6}", t):
-                last_ticker = t
-            elif re.fullmatch(r"\d+:1", t) and last_ticker:
-                r = int(t.split(":")[0])
-                ratios[last_ticker] = r
-                last_ticker = None
+        for tok in tokens:
+            if RATIO_RE.match(tok):
+                if last_ticker and (last_ticker not in ratios):
+                    ratios[last_ticker] = int(tok.split(":")[0])
+                    last_ticker = None
+            else:
+                t = re.sub(r"[^A-Z\.]", "", tok)
+                if is_ticker_token(t):
+                    last_ticker = t
 
     return ratios
 
+def parse_ratios_from_pdf_bytes(pdf_bytes: bytes) -> dict:
+    # Intento 1: pdfminer
+    text1 = extract_text_pdfminer(pdf_bytes)
+    ratios1 = parse_ratios_from_text(text1)
+
+    # Si no llega a 100 (deberían ser ~300+), probamos PyMuPDF
+    if len(ratios1) >= 100:
+        return ratios1
+
+    text2 = extract_text_pymupdf(pdf_bytes)
+    ratios2 = parse_ratios_from_text(text2)
+
+    # Elegimos el mejor
+    if len(ratios2) > len(ratios1):
+        return ratios2
+    return ratios1
+
 @st.cache_data(ttl=3600)
 def load_ratios_from_source(mode: str, source: str = "") -> dict:
+    """
+    Carga y cachea ratios CEDEAR {ticker: ratio} desde:
+      - mode='drive_default'  -> DEFAULT_DRIVE_URL
+      - mode='url'            -> URL directa de PDF
+      - mode='upload'         -> bytes en session_state (key: _upload_pdf_bytes)
+    """
     if mode == "drive_default":
         pdf_bytes = fetch_bytes_from_url(DEFAULT_DRIVE_URL)
     elif mode == "url":
@@ -165,14 +234,17 @@ else:  # Subir PDF
     if up is not None:
         b = up.read()
         st.session_state["_upload_pdf_bytes"] = b
-        key = hashlib.sha256(b).hexdigest()
+        key = hashlib.sha256(b).hexdigest()  # solo para cache key
         try:
             ratios = load_ratios_from_source("upload", key)
         except Exception as e:
             st.sidebar.error(f"No pude procesar el PDF subido: {e}")
 
+# Indicadores de calidad
 if ratios:
     st.sidebar.success(f"Ratios cargados: {len(ratios)}")
+    if len(ratios) < 100:
+        st.sidebar.warning("⚠️ Se detectaron pocos tickers. El PDF podría tener un formato atípico.")
 else:
     st.sidebar.warning("Aún no cargué ratios. Verificá la fuente elegida.")
 
