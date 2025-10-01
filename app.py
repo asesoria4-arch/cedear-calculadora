@@ -7,12 +7,13 @@
 import io
 import re
 import time
-import json
 import hashlib
 import requests
 import pandas as pd
 import yfinance as yf
 import streamlit as st
+from datetime import datetime
+import pytz
 
 # Backends de extracción de texto
 from pdfminer.high_level import extract_text as pdfminer_extract_text
@@ -54,15 +55,12 @@ DOLAR_CCL_URL = "https://dolarapi.com/v1/dolares/contadoconliqui"
 # Utilidades
 # --------------------------
 STOPWORDS = {
-    "CEDEAR", "CEDEARS", "BYMA", "BOLSAS", "MERCADOS", "ARGENTINOS", "RATIO",
-    "VALOR", "SUBYACENTE", "ISIN", "CUSIP", "NASDAQ", "NYSE", "LSE", "AMEX",
-    "USD", "ARS", "ETF", "SEDE", "ACCION", "EMPRESA", "SECTOR", "INDEX",
-    "TABLE", "PAGE", "VOL", "CUSPID", "ADR", "RATIO:", "CED", "PROGRAMAS",
-    "BOLSASY", "MERCADOSARGENTINOS", "DE", "LA", "EL", "EN", "SUBYACENTE:",
-    "RATIOCEDEAR/VALORSUBYACENTE", "RATIOCEDEAR", "VALORSUBYACENTE",
-    # meses / días frecuentes en PDFs
-    "ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE",
-    "MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"
+    "CEDEAR","CEDEARS","BYMA","BOLSAS","MERCADOS","ARGENTINOS","RATIO",
+    "VALOR","SUBYACENTE","ISIN","CUSIP","NASDAQ","NYSE","LSE","AMEX",
+    "USD","ARS","ETF","SEDE","ACCION","EMPRESA","SECTOR","INDEX",
+    "TABLE","PAGE","VOL","ADR","RATIO:","CED","PROGRAMAS",
+    "ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO",
+    "AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"
 }
 
 def fmt(x, nd=2):
@@ -76,7 +74,7 @@ def fetch_bytes_from_url(url: str, timeout=25) -> bytes:
     r.raise_for_status()
     return r.content
 
-# ------------ Extracción de texto (2 backends) ------------
+# ------------ Extracción de texto ------------
 def extract_text_pdfminer(pdf_bytes: bytes) -> str:
     try:
         return pdfminer_extract_text(io.BytesIO(pdf_bytes)) or ""
@@ -86,51 +84,41 @@ def extract_text_pdfminer(pdf_bytes: bytes) -> str:
 def extract_text_pymupdf(pdf_bytes: bytes) -> str:
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        chunks = []
-        for page in doc:
-            # "text" conserva orden "de lectura"; "blocks" a veces ayuda, pero empezamos simple
-            chunks.append(page.get_text("text"))
+        chunks = [page.get_text("text") for page in doc]
         doc.close()
         return "\n".join(chunks)
     except Exception:
         return ""
 
 # ------------ Heurísticas de parseo de ratios ------------
-TICKER_RE = re.compile(r"^[A-Z]{1,6}(?:\.[A-Z]{1,2})?$")  # AAPL, F, BRK.B
+TICKER_RE = re.compile(r"^[A-Z]{1,6}(?:\.[A-Z]{1,2})?$")
 RATIO_RE = re.compile(r"^(\d{1,3}):1$")
 
 def is_ticker_token(tok: str) -> bool:
-    if not TICKER_RE.match(tok):
-        return False
-    if tok in STOPWORDS:
-        return False
-    return True
+    return bool(TICKER_RE.match(tok)) and tok not in STOPWORDS
 
 def normalize_text(text: str) -> str:
     text = text.replace("\n", " ")
-    text = re.sub(r"\s+", " ", text)
-    return text
+    return re.sub(r"\s+", " ", text)
 
 def parse_ratios_from_text(text: str) -> dict:
     text = normalize_text(text)
     ratios = {}
 
-    # 1) Match directo: <TICKER> ... <d+:1>
+    # 1) Match directo
     direct = re.findall(r"\b([A-Z0-9\.]{1,6})\b[^:]{0,60}?(\d{1,3}:1)", text)
     for tk, rx in direct:
-        # limpiar ticker (por si viene con coma/punto final)
         tk = re.sub(r"[^A-Z\.]", "", tk)
         if is_ticker_token(tk):
-            r = int(rx.split(":")[0])
-            ratios[tk] = r
+            ratios[tk] = int(rx.split(":")[0])
 
-    # 2) Fallback: emparejar tokens (ticker → primer ratio siguiente)
-    if len(ratios) < 100:  # si capturó poco, aplicamos fallback
+    # 2) Fallback si pocos
+    if len(ratios) < 100:
         tokens = re.findall(r"[A-Z0-9\.]{1,10}|\d{1,3}:1", text)
         last_ticker = None
         for tok in tokens:
             if RATIO_RE.match(tok):
-                if last_ticker and (last_ticker not in ratios):
+                if last_ticker and last_ticker not in ratios:
                     ratios[last_ticker] = int(tok.split(":")[0])
                     last_ticker = None
             else:
@@ -141,30 +129,16 @@ def parse_ratios_from_text(text: str) -> dict:
     return ratios
 
 def parse_ratios_from_pdf_bytes(pdf_bytes: bytes) -> dict:
-    # Intento 1: pdfminer
     text1 = extract_text_pdfminer(pdf_bytes)
     ratios1 = parse_ratios_from_text(text1)
-
-    # Si no llega a 100 (deberían ser ~300+), probamos PyMuPDF
     if len(ratios1) >= 100:
         return ratios1
-
     text2 = extract_text_pymupdf(pdf_bytes)
     ratios2 = parse_ratios_from_text(text2)
-
-    # Elegimos el mejor
-    if len(ratios2) > len(ratios1):
-        return ratios2
-    return ratios1
+    return ratios2 if len(ratios2) > len(ratios1) else ratios1
 
 @st.cache_data(ttl=3600)
 def load_ratios_from_source(mode: str, source: str = "") -> dict:
-    """
-    Carga y cachea ratios CEDEAR {ticker: ratio} desde:
-      - mode='drive_default'  -> DEFAULT_DRIVE_URL
-      - mode='url'            -> URL directa de PDF
-      - mode='upload'         -> bytes en session_state (key: _upload_pdf_bytes)
-    """
     if mode == "drive_default":
         pdf_bytes = fetch_bytes_from_url(DEFAULT_DRIVE_URL)
     elif mode == "url":
@@ -203,7 +177,7 @@ def calcular_precio_cedear(ticker: str, ratios: dict):
     return price_usd, ratio, ccl, precio_ars
 
 # --------------------------
-# Sidebar: Fuente de Ratios
+# Sidebar
 # --------------------------
 st.sidebar.header("⚙️ Configuración de ratios CEDEAR")
 mode = st.sidebar.radio(
@@ -214,8 +188,6 @@ mode = st.sidebar.radio(
 
 ratios = {}
 if mode == "Drive (por defecto)":
-    with st.sidebar:
-        st.caption("Usando el PDF de tu Google Drive (por defecto).")
     try:
         ratios = load_ratios_from_source("drive_default")
     except Exception as e:
@@ -229,27 +201,23 @@ elif mode == "Pegar URL PDF":
         except Exception as e:
             st.sidebar.error(f"No pude cargar el PDF de esa URL: {e}")
 
-else:  # Subir PDF
+else:
     up = st.sidebar.file_uploader("Subí el PDF de BYMA", type=["pdf"])
     if up is not None:
         b = up.read()
         st.session_state["_upload_pdf_bytes"] = b
-        key = hashlib.sha256(b).hexdigest()  # solo para cache key
+        key = hashlib.sha256(b).hexdigest()
         try:
             ratios = load_ratios_from_source("upload", key)
         except Exception as e:
             st.sidebar.error(f"No pude procesar el PDF subido: {e}")
 
-# Indicadores de calidad
 if ratios:
     st.sidebar.success(f"Ratios cargados: {len(ratios)}")
     if len(ratios) < 100:
         st.sidebar.warning("⚠️ Se detectaron pocos tickers. El PDF podría tener un formato atípico.")
 else:
     st.sidebar.warning("Aún no cargué ratios. Verificá la fuente elegida.")
-
-st.sidebar.markdown("---")
-st.sidebar.caption("💡 Cambiá la fuente cuando quieras. La app cachea resultados por 1 hora.")
 
 # --------------------------
 # App: Input y Cálculo
@@ -258,7 +226,6 @@ col1, col2 = st.columns([2,1])
 with col1:
     ticker = st.text_input("Ticker del subyacente (Ej: AAPL, MSFT, MELI, F):", value="AAPL").strip().upper()
 with col2:
-    st.write("")
     go = st.button("Calcular CEDEAR", type="primary")
 
 if "hist" not in st.session_state:
@@ -293,7 +260,7 @@ if go:
                 "Ratio": ratio,
                 "CCL": ccl,
                 "Precio_CEDEAR_ARS": px_ars,
-                "TS": pd.Timestamp.utcnow().tz_localize("UTC").tz_convert("America/Argentina/Buenos_Aires")
+                "TS": datetime.now(pytz.timezone("America/Argentina/Buenos_Aires"))
             })
 
 # --------------------------
