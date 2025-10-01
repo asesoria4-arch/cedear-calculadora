@@ -231,4 +231,64 @@ with col2:
     go = st.button("Calcular CEDEAR", type="primary")
 
 if "hist" not in st.session_state:
-    st.session_state["h]()_
+    st.session_state["hist"] = []
+
+if go:
+    if not ratios:
+        st.error("No hay ratios cargados. Revisá la configuración en la barra lateral.")
+    elif ticker not in ratios:
+        st.error(f"El ticker **{ticker}** no figura en la tabla BYMA cargada.")
+    else:
+        with st.spinner("Calculando..."):
+            px_usd, ratio, ccl, px_ars = calcular_precio_cedear(ticker, ratios)
+
+        if px_usd == 0 or ratio == 0 or ccl == 0 or px_ars is None:
+            st.error("No se pudieron obtener todos los datos (precio USD, ratio o CCL).")
+        else:
+            st.markdown(f"""
+<div class="result-card">
+  <h3>📌 Cálculo CEDEAR para <b>{ticker}</b></h3>
+  <p>💵 <b>Precio Acción:</b> {fmt(px_usd)} USD</p>
+  <p>🔄 <b>Ratio CEDEAR:</b> {ratio}:1</p>
+  <p>💲 <b>Dólar CCL:</b> {fmt(ccl)}</p>
+  <hr>
+  <p class="result-highlight">➡️ <b>Precio CEDEAR teórico:</b> ${fmt(px_ars)} ARS</p>
+</div>
+""", unsafe_allow_html=True)
+
+            st.session_state["hist"].append({
+                "Ticker": ticker,
+                "Precio_USD": px_usd,
+                "Ratio": ratio,
+                "CCL": ccl,
+                "Precio_CEDEAR_ARS": px_ars,
+                "TS": datetime.now(pytz.timezone("America/Argentina/Buenos_Aires"))
+            })
+
+# --------------------------
+# Historial + Exportar
+# --------------------------
+st.markdown("### 🗂️ Historial de cálculos (sesión)")
+if len(st.session_state["hist"]) == 0:
+    st.info("Todavía no hay cálculos en esta sesión.")
+else:
+    df = pd.DataFrame(st.session_state["hist"])
+
+    # Fix: convertir TS a naive datetime (Excel no acepta tz-aware)
+    if "TS" in df.columns:
+        df["TS"] = pd.to_datetime(df["TS"]).dt.tz_localize(None)
+
+    st.dataframe(df, use_container_width=True)
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="CEDEARs")
+    st.download_button(
+        label="⬇️ Descargar Excel",
+        data=buffer.getvalue(),
+        file_name=f"cedears_{int(time.time())}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+st.markdown("---")
+st.caption("Fuente ratios: BYMA (PDF). Precio USD: Yahoo Finance. CCL: dolarapi.com. Valores teóricos e informativos.")
