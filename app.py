@@ -107,7 +107,6 @@ def normalize_text(text: str) -> str:
 def parse_ratios_from_text(text: str) -> dict:
     text = normalize_text(text)
     ratios = {}
-    # Match directo: <TICKER> ... <d+:1>
     direct = re.findall(r"\b([A-Z0-9\.]{1,6})\b[^:]{0,60}?(\d{1,3}:1)", text)
     for tk, rx in direct:
         tk = re.sub(r"[^A-Z\.]", "", tk)
@@ -150,7 +149,6 @@ def get_stock_price_usd(ticker: str) -> float:
             last = df["Close"].dropna()
             if not last.empty and float(last.iloc[-1]) > 0:
                 return round(float(last.iloc[-1]), 2)
-        # Fallback: diario
         df = t.history(period="1d")
         if isinstance(df, pd.DataFrame) and not df.empty and "Close" in df.columns:
             return round(float(df["Close"].dropna().iloc[-1]), 2)
@@ -166,9 +164,9 @@ def calcular_precio_cedear(ticker: str, ratios: dict):
     ccl, mep = get_ccl_mep()
     if price_usd == 0 or ratio == 0 or ccl == 0 or mep == 0:
         return price_usd, ratio, ccl, mep, None, None, None
-    canje = mep / ccl  # factor MEP/CCL
+    canje = mep / ccl
     precio_usd_canje = round((price_usd / ratio) * canje, 2)
-    precio_ars_canje = round(precio_usd_canje * ccl, 2)  # equivale a (price_usd/ratio)*MEP
+    precio_ars_canje = round(precio_usd_canje * ccl, 2)
     return price_usd, ratio, ccl, mep, canje, precio_usd_canje, precio_ars_canje
 
 # --------------------------
@@ -205,8 +203,8 @@ if go:
   <p>💲 <b>Dólar CCL:</b> {fmt(ccl)}</p>
   <p>💲 <b>Dólar MEP:</b> {fmt(mep)}</p>
   <hr>
-  <p class="result-price">➡️ <b>Precio CEDEAR teórico USD (ajustado por canje):</b> {fmt(px_usd_canje)} USD</p>
-  <p class="result-price">➡️ <b>Precio CEDEAR teórico ARS (ajustado):</b> ${fmt(px_ars_canje)} ARS</p>
+  <p class="result-price">➡️ <b>Precio CEDEAR teórico USD:</b> {fmt(px_usd_canje)} USD</p>
+  <p class="result-price">➡️ <b>Precio CEDEAR teórico ARS:</b> ${fmt(px_ars_canje)} ARS</p>
   <div class="small-note">Canje MEP/CCL: {fmt(canje, 4)}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -246,4 +244,4 @@ else:
     )
 
 st.markdown("---")
-st.caption("Fuente ratios: BYMA (PDF). Precio subyacente: Yahoo Finance (intradiario si disponible). CCL y MEP: dolarapi.com. Cálculo teórico ajustado por canje (MEP/CCL).")
+st.caption("Fuente ratios: BYMA (PDF). Precio subyacente: Yahoo Finance (intradiario si disponible). CCL y MEP: dolarapi.com. Cálculo teórico con ajuste por canje (MEP/CCL).")
