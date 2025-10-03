@@ -37,6 +37,7 @@ div[data-baseweb="input"] input { font-size: 1.05rem !important; }
 }
 .result-card h3 { margin-top: 0; margin-bottom: 10px; color: #000; }
 .result-highlight { font-size: 1.25rem; font-weight: 700; color: #000; }
+.result-price { font-size: 1.25rem; font-weight: 700; color: #000; margin: 5px 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -253,8 +254,8 @@ if go:
   <p>🔄 <b>Ratio CEDEAR:</b> {ratio}:1</p>
   <p>💲 <b>Dólar CCL:</b> {fmt(ccl)}</p>
   <hr>
-  <p style="font-size:20px; color:#000;">➡️ <b>Precio CEDEAR teórico USD:</b> {fmt(px_usd_cedear)} USD</p>
-  <p class="result-highlight">➡️ <b>Precio CEDEAR teórico ARS:</b> ${fmt(px_ars_cedear)} ARS</p>
+  <p class="result-price">➡️ <b>Precio CEDEAR teórico USD:</b> {fmt(px_usd_cedear)} USD</p>
+  <p class="result-price">➡️ <b>Precio CEDEAR teórico ARS:</b> ${fmt(px_ars_cedear)} ARS</p>
 </div>
 """, unsafe_allow_html=True)
 
