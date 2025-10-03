@@ -1,5 +1,5 @@
 # ============================================================
-# Antifragil Inversiones – Calculadora CEDEARs
+# Antifragil Inversiones – Calculadora CEDEARs (con ajuste por canje MEP/CCL)
 # Autor: Diego + Asistente
 # Última actualización: 2025-10-02
 # ============================================================
@@ -36,7 +36,6 @@ div[data-baseweb="input"] input { font-size: 1.05rem !important; }
   background: #ffffff; font-size: 1.05rem; line-height: 1.6; color: #000000;
 }
 .result-card h3 { margin-top: 0; margin-bottom: 10px; color: #000; }
-.result-highlight { font-size: 1.25rem; font-weight: 700; color: #000; }
 .result-price { font-size: 1.25rem; font-weight: 700; color: #000; margin: 5px 0; }
 </style>
 """, unsafe_allow_html=True)
@@ -45,14 +44,15 @@ div[data-baseweb="input"] input { font-size: 1.05rem !important; }
 # Título
 # --------------------------
 st.title("💼 Antifragil Inversiones – 💱 Calculadora CEDEARs")
-st.caption("Ingresá un **ticker del subyacente** (ej: AAPL, MSFT, MELI, F). La app calcula el valor teórico del CEDEAR en USD y en ARS, usando **ratio BYMA** y **dólar CCL**.")
+st.caption("El cálculo aplica ajuste por canje (MEP/CCL). Valores teóricos en USD y ARS.")
 
 # --------------------------
 # Fuentes de datos / Config
 # --------------------------
 DEFAULT_DRIVE_ID = "134hLt7AEujGcoPHhlywLS6ifUGxH-Jw7"
 DEFAULT_DRIVE_URL = f"https://drive.google.com/uc?id={DEFAULT_DRIVE_ID}&export=download"
-DOLAR_CCL_URL = "https://dolarapi.com/v1/dolares/contadoconliqui"
+URL_CCL = "https://dolarapi.com/v1/dolares/contadoconliqui"
+URL_MEP = "https://dolarapi.com/v1/dolares/bolsa"
 
 # --------------------------
 # Utilidades
@@ -153,12 +153,13 @@ def load_ratios_from_source(mode: str, source: str = "") -> dict:
     return parse_ratios_from_pdf_bytes(pdf_bytes)
 
 @st.cache_data(ttl=300)
-def get_ccl_price() -> float:
+def get_ccl_mep():
     try:
-        data = requests.get(DOLAR_CCL_URL, timeout=10).json()
-        return float(data["venta"])
+        ccl = requests.get(URL_CCL, timeout=10).json()["venta"]
+        mep = requests.get(URL_MEP, timeout=10).json()["venta"]
+        return float(ccl), float(mep)
     except Exception:
-        return 0.0
+        return 0.0, 0.0
 
 def get_stock_price_usd(ticker: str) -> float:
     try:
@@ -170,15 +171,16 @@ def get_stock_price_usd(ticker: str) -> float:
 
 def calcular_precio_cedear(ticker: str, ratios: dict):
     if ticker not in ratios:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     price_usd = get_stock_price_usd(ticker)
     ratio = int(ratios.get(ticker, 0)) or 0
-    ccl = get_ccl_price()
-    if price_usd == 0 or ratio == 0 or ccl == 0:
-        return price_usd, ratio, ccl, None, None
-    precio_usd_cedear = round(price_usd / ratio, 2)
+    ccl, mep = get_ccl_mep()
+    if price_usd == 0 or ratio == 0 or ccl == 0 or mep == 0:
+        return price_usd, ratio, ccl, mep, None, None
+    canje = mep / ccl
+    precio_usd_cedear = round((price_usd / ratio) * canje, 2)
     precio_ars_cedear = round(precio_usd_cedear * ccl, 2)
-    return price_usd, ratio, ccl, precio_usd_cedear, precio_ars_cedear
+    return price_usd, ratio, ccl, mep, precio_usd_cedear, precio_ars_cedear
 
 # --------------------------
 # Sidebar
@@ -242,10 +244,10 @@ if go:
         st.error(f"El ticker **{ticker}** no figura en la tabla BYMA cargada.")
     else:
         with st.spinner("Calculando..."):
-            px_usd, ratio, ccl, px_usd_cedear, px_ars_cedear = calcular_precio_cedear(ticker, ratios)
+            px_usd, ratio, ccl, mep, px_usd_cedear, px_ars_cedear = calcular_precio_cedear(ticker, ratios)
 
-        if px_usd == 0 or ratio == 0 or ccl == 0 or px_usd_cedear is None:
-            st.error("No se pudieron obtener todos los datos (precio USD, ratio o CCL).")
+        if px_usd == 0 or ratio == 0 or ccl == 0 or mep == 0 or px_usd_cedear is None:
+            st.error("No se pudieron obtener todos los datos (precio USD, ratio o CCL/MEP).")
         else:
             st.markdown(f"""
 <div class="result-card">
@@ -253,8 +255,9 @@ if go:
   <p>💵 <b>Precio Acción:</b> {fmt(px_usd)} USD</p>
   <p>🔄 <b>Ratio CEDEAR:</b> {ratio}:1</p>
   <p>💲 <b>Dólar CCL:</b> {fmt(ccl)}</p>
+  <p>💲 <b>Dólar MEP:</b> {fmt(mep)}</p>
   <hr>
-  <p class="result-price">➡️ <b>Precio CEDEAR teórico USD:</b> {fmt(px_usd_cedear)} USD</p>
+  <p class="result-price">➡️ <b>Precio CEDEAR teórico USD (ajustado por canje):</b> {fmt(px_usd_cedear)} USD</p>
   <p class="result-price">➡️ <b>Precio CEDEAR teórico ARS:</b> ${fmt(px_ars_cedear)} ARS</p>
 </div>
 """, unsafe_allow_html=True)
@@ -264,7 +267,8 @@ if go:
                 "Precio_USD": px_usd,
                 "Ratio": ratio,
                 "CCL": ccl,
-                "Precio_CEDEAR_USD": px_usd_cedear,
+                "MEP": mep,
+                "Precio_CEDEAR_USD_Canje": px_usd_cedear,
                 "Precio_CEDEAR_ARS": px_ars_cedear,
                 "TS": datetime.now(pytz.timezone("America/Argentina/Buenos_Aires"))
             })
@@ -294,4 +298,4 @@ else:
     )
 
 st.markdown("---")
-st.caption("Fuente ratios: BYMA (PDF). Precio USD: Yahoo Finance. CCL: dolarapi.com. Valores teóricos e informativos.")
+st.caption("Fuente ratios: BYMA (PDF). Precios subyacentes: Yahoo Finance. Dólares: dolarapi.com. Cálculo teórico ajustado por canje (MEP/CCL).")
