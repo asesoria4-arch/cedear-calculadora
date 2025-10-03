@@ -1,7 +1,7 @@
 # ============================================================
-# Antifragil Inversiones – Calculadora CEDEARs (con ajuste por canje MEP/CCL)
+# Antifragil Inversiones – Calculadora CEDEARs (ajuste por canje MEP/CCL)
 # Autor: Diego + Asistente
-# Última actualización: 2025-10-02
+# Última actualización: 2025-10-03
 # ============================================================
 
 import io
@@ -15,7 +15,7 @@ import streamlit as st
 from datetime import datetime
 import pytz
 
-# Backends de extracción de texto
+# Backends para extraer texto del PDF
 from pdfminer.high_level import extract_text as pdfminer_extract_text
 import fitz  # PyMuPDF
 
@@ -24,7 +24,7 @@ import fitz  # PyMuPDF
 # --------------------------
 st.set_page_config(page_title="Antifragil Inversiones – Calculadora CEDEARs", page_icon="💼", layout="centered")
 
-# CSS (texto negro, tarjeta grande)
+# CSS
 st.markdown("""
 <style>
 html, body, [class*="css"]  { color: #000 !important; }
@@ -44,10 +44,10 @@ div[data-baseweb="input"] input { font-size: 1.05rem !important; }
 # Título
 # --------------------------
 st.title("💼 Antifragil Inversiones – 💱 Calculadora CEDEARs")
-st.caption("El cálculo aplica ajuste por canje (MEP/CCL). Valores teóricos en USD y ARS.")
+st.caption("El cálculo aplica ajuste por canje (MEP/CCL). Se muestran valores teóricos en USD y en ARS.")
 
 # --------------------------
-# Fuentes de datos / Config
+# Config API y fuentes
 # --------------------------
 DEFAULT_DRIVE_ID = "134hLt7AEujGcoPHhlywLS6ifUGxH-Jw7"
 DEFAULT_DRIVE_URL = f"https://drive.google.com/uc?id={DEFAULT_DRIVE_ID}&export=download"
@@ -77,7 +77,9 @@ def fetch_bytes_from_url(url: str, timeout=25) -> bytes:
     r.raise_for_status()
     return r.content
 
-# ------------ Extracción de texto ------------
+# --------------------------
+# Parseo PDF ratios CEDEARs
+# --------------------------
 def extract_text_pdfminer(pdf_bytes: bytes) -> str:
     try:
         return pdfminer_extract_text(io.BytesIO(pdf_bytes)) or ""
@@ -93,7 +95,6 @@ def extract_text_pymupdf(pdf_bytes: bytes) -> str:
     except Exception:
         return ""
 
-# ------------ Heurísticas de parseo de ratios ------------
 TICKER_RE = re.compile(r"^[A-Z]{1,6}(?:\.[A-Z]{1,2})?$")
 RATIO_RE = re.compile(r"^(\d{1,3}):1$")
 
@@ -101,34 +102,16 @@ def is_ticker_token(tok: str) -> bool:
     return bool(TICKER_RE.match(tok)) and tok not in STOPWORDS
 
 def normalize_text(text: str) -> str:
-    text = text.replace("\n", " ")
-    return re.sub(r"\s+", " ", text)
+    return re.sub(r"\s+", " ", text.replace("\n", " "))
 
 def parse_ratios_from_text(text: str) -> dict:
     text = normalize_text(text)
     ratios = {}
-
-    # 1) Match directo
     direct = re.findall(r"\b([A-Z0-9\.]{1,6})\b[^:]{0,60}?(\d{1,3}:1)", text)
     for tk, rx in direct:
         tk = re.sub(r"[^A-Z\.]", "", tk)
         if is_ticker_token(tk):
             ratios[tk] = int(rx.split(":")[0])
-
-    # 2) Fallback si pocos
-    if len(ratios) < 100:
-        tokens = re.findall(r"[A-Z0-9\.]{1,10}|\d{1,3}:1", text)
-        last_ticker = None
-        for tok in tokens:
-            if RATIO_RE.match(tok):
-                if last_ticker and last_ticker not in ratios:
-                    ratios[last_ticker] = int(tok.split(":")[0])
-                    last_ticker = None
-            else:
-                t = re.sub(r"[^A-Z\.]", "", tok)
-                if is_ticker_token(t):
-                    last_ticker = t
-
     return ratios
 
 def parse_ratios_from_pdf_bytes(pdf_bytes: bytes) -> dict:
@@ -141,17 +124,13 @@ def parse_ratios_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     return ratios2 if len(ratios2) > len(ratios1) else ratios1
 
 @st.cache_data(ttl=3600)
-def load_ratios_from_source(mode: str, source: str = "") -> dict:
-    if mode == "drive_default":
-        pdf_bytes = fetch_bytes_from_url(DEFAULT_DRIVE_URL)
-    elif mode == "url":
-        pdf_bytes = fetch_bytes_from_url(source)
-    elif mode == "upload":
-        pdf_bytes = st.session_state["_upload_pdf_bytes"]
-    else:
-        return {}
+def load_ratios_from_source() -> dict:
+    pdf_bytes = fetch_bytes_from_url(DEFAULT_DRIVE_URL)
     return parse_ratios_from_pdf_bytes(pdf_bytes)
 
+# --------------------------
+# Datos financieros
+# --------------------------
 @st.cache_data(ttl=300)
 def get_ccl_mep():
     try:
@@ -183,51 +162,10 @@ def calcular_precio_cedear(ticker: str, ratios: dict):
     return price_usd, ratio, ccl, mep, precio_usd_cedear, precio_ars_cedear
 
 # --------------------------
-# Sidebar
+# App
 # --------------------------
-st.sidebar.header("⚙️ Configuración de ratios CEDEAR")
-mode = st.sidebar.radio(
-    "Fuente del PDF de BYMA:",
-    options=["Drive (por defecto)", "Pegar URL PDF", "Subir PDF"],
-    index=0
-)
+ratios = load_ratios_from_source()
 
-ratios = {}
-if mode == "Drive (por defecto)":
-    try:
-        ratios = load_ratios_from_source("drive_default")
-    except Exception as e:
-        st.sidebar.error(f"No pude cargar el PDF por defecto: {e}")
-
-elif mode == "Pegar URL PDF":
-    url_pdf = st.sidebar.text_input("URL directa a un PDF público", value=DEFAULT_DRIVE_URL)
-    if url_pdf:
-        try:
-            ratios = load_ratios_from_source("url", url_pdf)
-        except Exception as e:
-            st.sidebar.error(f"No pude cargar el PDF de esa URL: {e}")
-
-else:
-    up = st.sidebar.file_uploader("Subí el PDF de BYMA", type=["pdf"])
-    if up is not None:
-        b = up.read()
-        st.session_state["_upload_pdf_bytes"] = b
-        key = hashlib.sha256(b).hexdigest()
-        try:
-            ratios = load_ratios_from_source("upload", key)
-        except Exception as e:
-            st.sidebar.error(f"No pude procesar el PDF subido: {e}")
-
-if ratios:
-    st.sidebar.success(f"Ratios cargados: {len(ratios)}")
-    if len(ratios) < 100:
-        st.sidebar.warning("⚠️ Se detectaron pocos tickers. El PDF podría tener un formato atípico.")
-else:
-    st.sidebar.warning("Aún no cargué ratios. Verificá la fuente elegida.")
-
-# --------------------------
-# App: Input y Cálculo
-# --------------------------
 col1, col2 = st.columns([2,1])
 with col1:
     ticker = st.text_input("Ticker del subyacente (Ej: AAPL, MSFT, MELI, F):", value="AAPL").strip().upper()
@@ -239,7 +177,7 @@ if "hist" not in st.session_state:
 
 if go:
     if not ratios:
-        st.error("No hay ratios cargados. Revisá la configuración en la barra lateral.")
+        st.error("No hay ratios cargados. Revisá la fuente de datos.")
     elif ticker not in ratios:
         st.error(f"El ticker **{ticker}** no figura en la tabla BYMA cargada.")
     else:
@@ -247,7 +185,7 @@ if go:
             px_usd, ratio, ccl, mep, px_usd_cedear, px_ars_cedear = calcular_precio_cedear(ticker, ratios)
 
         if px_usd == 0 or ratio == 0 or ccl == 0 or mep == 0 or px_usd_cedear is None:
-            st.error("No se pudieron obtener todos los datos (precio USD, ratio o CCL/MEP).")
+            st.error("No se pudieron obtener todos los datos (precio USD, ratio, CCL o MEP).")
         else:
             st.markdown(f"""
 <div class="result-card">
@@ -274,17 +212,15 @@ if go:
             })
 
 # --------------------------
-# Historial + Exportar
+# Historial
 # --------------------------
 st.markdown("### 🗂️ Historial de cálculos (sesión)")
 if len(st.session_state["hist"]) == 0:
     st.info("Todavía no hay cálculos en esta sesión.")
 else:
     df = pd.DataFrame(st.session_state["hist"])
-
     if "TS" in df.columns:
         df["TS"] = pd.to_datetime(df["TS"]).dt.tz_localize(None)
-
     st.dataframe(df, use_container_width=True)
 
     buffer = io.BytesIO()
@@ -298,4 +234,4 @@ else:
     )
 
 st.markdown("---")
-st.caption("Fuente ratios: BYMA (PDF). Precios subyacentes: Yahoo Finance. Dólares: dolarapi.com. Cálculo teórico ajustado por canje (MEP/CCL).")
+st.caption("Fuente ratios: BYMA (PDF). Precios: Yahoo Finance. CCL y MEP: dolarapi.com. Cálculo teórico ajustado por canje (MEP/CCL).")
