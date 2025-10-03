@@ -37,6 +37,7 @@ div[data-baseweb="input"] input { font-size: 1.05rem !important; }
 }
 .result-card h3 { margin-top: 0; margin-bottom: 10px; color: #000; }
 .result-price { font-size: 1.25rem; font-weight: 700; color: #000; margin: 5px 0; }
+.small-note { font-size: 0.9rem; color: #222; margin-top: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -96,7 +97,6 @@ def extract_text_pymupdf(pdf_bytes: bytes) -> str:
         return ""
 
 TICKER_RE = re.compile(r"^[A-Z]{1,6}(?:\.[A-Z]{1,2})?$")
-RATIO_RE = re.compile(r"^(\d{1,3}):1$")
 
 def is_ticker_token(tok: str) -> bool:
     return bool(TICKER_RE.match(tok)) and tok not in STOPWORDS
@@ -107,6 +107,7 @@ def normalize_text(text: str) -> str:
 def parse_ratios_from_text(text: str) -> dict:
     text = normalize_text(text)
     ratios = {}
+    # Match directo: <TICKER> ... <d+:1>
     direct = re.findall(r"\b([A-Z0-9\.]{1,6})\b[^:]{0,60}?(\d{1,3}:1)", text)
     for tk, rx in direct:
         tk = re.sub(r"[^A-Z\.]", "", tk)
@@ -141,25 +142,34 @@ def get_ccl_mep():
         return 0.0, 0.0
 
 def get_stock_price_usd(ticker: str) -> float:
+    """Usa intradiario 1m si está disponible; si no, cae a último cierre."""
     try:
         t = yf.Ticker(ticker)
-        px = t.history(period="1d")["Close"].iloc[-1]
-        return round(float(px), 2)
+        df = t.history(period="1d", interval="1m")
+        if isinstance(df, pd.DataFrame) and not df.empty and "Close" in df.columns:
+            last = df["Close"].dropna()
+            if not last.empty and float(last.iloc[-1]) > 0:
+                return round(float(last.iloc[-1]), 2)
+        # Fallback: diario
+        df = t.history(period="1d")
+        if isinstance(df, pd.DataFrame) and not df.empty and "Close" in df.columns:
+            return round(float(df["Close"].dropna().iloc[-1]), 2)
     except Exception:
-        return 0.0
+        pass
+    return 0.0
 
 def calcular_precio_cedear(ticker: str, ratios: dict):
     if ticker not in ratios:
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
     price_usd = get_stock_price_usd(ticker)
     ratio = int(ratios.get(ticker, 0)) or 0
     ccl, mep = get_ccl_mep()
     if price_usd == 0 or ratio == 0 or ccl == 0 or mep == 0:
-        return price_usd, ratio, ccl, mep, None, None
-    canje = mep / ccl
-    precio_usd_cedear = round((price_usd / ratio) * canje, 2)
-    precio_ars_cedear = round(precio_usd_cedear * ccl, 2)
-    return price_usd, ratio, ccl, mep, precio_usd_cedear, precio_ars_cedear
+        return price_usd, ratio, ccl, mep, None, None, None
+    canje = mep / ccl  # factor MEP/CCL
+    precio_usd_canje = round((price_usd / ratio) * canje, 2)
+    precio_ars_canje = round(precio_usd_canje * ccl, 2)  # equivale a (price_usd/ratio)*MEP
+    return price_usd, ratio, ccl, mep, canje, precio_usd_canje, precio_ars_canje
 
 # --------------------------
 # App
@@ -182,9 +192,9 @@ if go:
         st.error(f"El ticker **{ticker}** no figura en la tabla BYMA cargada.")
     else:
         with st.spinner("Calculando..."):
-            px_usd, ratio, ccl, mep, px_usd_cedear, px_ars_cedear = calcular_precio_cedear(ticker, ratios)
+            px_usd, ratio, ccl, mep, canje, px_usd_canje, px_ars_canje = calcular_precio_cedear(ticker, ratios)
 
-        if px_usd == 0 or ratio == 0 or ccl == 0 or mep == 0 or px_usd_cedear is None:
+        if px_usd == 0 or ratio == 0 or ccl == 0 or mep == 0 or px_usd_canje is None:
             st.error("No se pudieron obtener todos los datos (precio USD, ratio, CCL o MEP).")
         else:
             st.markdown(f"""
@@ -195,8 +205,9 @@ if go:
   <p>💲 <b>Dólar CCL:</b> {fmt(ccl)}</p>
   <p>💲 <b>Dólar MEP:</b> {fmt(mep)}</p>
   <hr>
-  <p class="result-price">➡️ <b>Precio CEDEAR teórico USD (ajustado por canje):</b> {fmt(px_usd_cedear)} USD</p>
-  <p class="result-price">➡️ <b>Precio CEDEAR teórico ARS:</b> ${fmt(px_ars_cedear)} ARS</p>
+  <p class="result-price">➡️ <b>Precio CEDEAR teórico USD (ajustado por canje):</b> {fmt(px_usd_canje)} USD</p>
+  <p class="result-price">➡️ <b>Precio CEDEAR teórico ARS (ajustado):</b> ${fmt(px_ars_canje)} ARS</p>
+  <div class="small-note">Canje MEP/CCL: {fmt(canje, 4)}</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -206,8 +217,9 @@ if go:
                 "Ratio": ratio,
                 "CCL": ccl,
                 "MEP": mep,
-                "Precio_CEDEAR_USD_Canje": px_usd_cedear,
-                "Precio_CEDEAR_ARS": px_ars_cedear,
+                "Canje": canje,
+                "Precio_CEDEAR_USD_Canje": px_usd_canje,
+                "Precio_CEDEAR_ARS": px_ars_canje,
                 "TS": datetime.now(pytz.timezone("America/Argentina/Buenos_Aires"))
             })
 
@@ -234,4 +246,4 @@ else:
     )
 
 st.markdown("---")
-st.caption("Fuente ratios: BYMA (PDF). Precios: Yahoo Finance. CCL y MEP: dolarapi.com. Cálculo teórico ajustado por canje (MEP/CCL).")
+st.caption("Fuente ratios: BYMA (PDF). Precio subyacente: Yahoo Finance (intradiario si disponible). CCL y MEP: dolarapi.com. Cálculo teórico ajustado por canje (MEP/CCL).")
