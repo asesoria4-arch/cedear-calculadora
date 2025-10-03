@@ -1,7 +1,7 @@
 # ============================================================
 # Antifragil Inversiones – Calculadora CEDEARs
 # Autor: Diego + Asistente
-# Última actualización: 2025-10-01
+# Última actualización: 2025-10-02
 # ============================================================
 
 import io
@@ -44,12 +44,12 @@ div[data-baseweb="input"] input { font-size: 1.05rem !important; }
 # Título
 # --------------------------
 st.title("💼 Antifragil Inversiones – 💱 Calculadora CEDEARs")
-st.caption("Ingresá un **ticker del subyacente** (ej: AAPL, MSFT, MELI, F). La app calcula el precio teórico del CEDEAR en ARS usando **ratio BYMA** y **dólar CCL**.")
+st.caption("Ingresá un **ticker del subyacente** (ej: AAPL, MSFT, MELI, F). La app calcula el valor teórico del CEDEAR en USD y en ARS, usando **ratio BYMA** y **dólar CCL**.")
 
 # --------------------------
 # Fuentes de datos / Config
 # --------------------------
-DEFAULT_DRIVE_ID = "134hLt7AEujGcoPHhlywLS6ifUGxH-Jw7"  # tu PDF BYMA
+DEFAULT_DRIVE_ID = "134hLt7AEujGcoPHhlywLS6ifUGxH-Jw7"
 DEFAULT_DRIVE_URL = f"https://drive.google.com/uc?id={DEFAULT_DRIVE_ID}&export=download"
 DOLAR_CCL_URL = "https://dolarapi.com/v1/dolares/contadoconliqui"
 
@@ -169,14 +169,15 @@ def get_stock_price_usd(ticker: str) -> float:
 
 def calcular_precio_cedear(ticker: str, ratios: dict):
     if ticker not in ratios:
-        return None, None, None, None
+        return None, None, None, None, None
     price_usd = get_stock_price_usd(ticker)
     ratio = int(ratios.get(ticker, 0)) or 0
     ccl = get_ccl_price()
     if price_usd == 0 or ratio == 0 or ccl == 0:
-        return price_usd, ratio, ccl, None
-    precio_ars = round(price_usd / ratio * ccl, 2)
-    return price_usd, ratio, ccl, precio_ars
+        return price_usd, ratio, ccl, None, None
+    precio_usd_cedear = round(price_usd / ratio, 2)
+    precio_ars_cedear = round(precio_usd_cedear * ccl, 2)
+    return price_usd, ratio, ccl, precio_usd_cedear, precio_ars_cedear
 
 # --------------------------
 # Sidebar
@@ -240,9 +241,9 @@ if go:
         st.error(f"El ticker **{ticker}** no figura en la tabla BYMA cargada.")
     else:
         with st.spinner("Calculando..."):
-            px_usd, ratio, ccl, px_ars = calcular_precio_cedear(ticker, ratios)
+            px_usd, ratio, ccl, px_usd_cedear, px_ars_cedear = calcular_precio_cedear(ticker, ratios)
 
-        if px_usd == 0 or ratio == 0 or ccl == 0 or px_ars is None:
+        if px_usd == 0 or ratio == 0 or ccl == 0 or px_usd_cedear is None:
             st.error("No se pudieron obtener todos los datos (precio USD, ratio o CCL).")
         else:
             st.markdown(f"""
@@ -252,7 +253,8 @@ if go:
   <p>🔄 <b>Ratio CEDEAR:</b> {ratio}:1</p>
   <p>💲 <b>Dólar CCL:</b> {fmt(ccl)}</p>
   <hr>
-  <p class="result-highlight">➡️ <b>Precio CEDEAR teórico:</b> ${fmt(px_ars)} ARS</p>
+  <p style="font-size:20px; color:#000;">➡️ <b>Precio CEDEAR teórico USD:</b> {fmt(px_usd_cedear)} USD</p>
+  <p class="result-highlight">➡️ <b>Precio CEDEAR teórico ARS:</b> ${fmt(px_ars_cedear)} ARS</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -261,7 +263,8 @@ if go:
                 "Precio_USD": px_usd,
                 "Ratio": ratio,
                 "CCL": ccl,
-                "Precio_CEDEAR_ARS": px_ars,
+                "Precio_CEDEAR_USD": px_usd_cedear,
+                "Precio_CEDEAR_ARS": px_ars_cedear,
                 "TS": datetime.now(pytz.timezone("America/Argentina/Buenos_Aires"))
             })
 
@@ -274,7 +277,6 @@ if len(st.session_state["hist"]) == 0:
 else:
     df = pd.DataFrame(st.session_state["hist"])
 
-    # Fix: convertir TS a naive datetime (Excel no acepta tz-aware)
     if "TS" in df.columns:
         df["TS"] = pd.to_datetime(df["TS"]).dt.tz_localize(None)
 
