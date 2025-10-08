@@ -1,7 +1,7 @@
 # ============================================================
-# Antifragil Inversiones – Calculadora CEDEARs (ajuste por canje MEP/CCL)
+# Antifragil Inversiones – Calculadora CEDEARs (ajuste por canje CCL/MEP)
 # Autor: Diego + Asistente
-# Última actualización: 2025-10-03
+# Última actualización: 2025-10-08
 # ============================================================
 
 import io
@@ -45,7 +45,7 @@ div[data-baseweb="input"] input { font-size: 1.05rem !important; }
 # Título
 # --------------------------
 st.title("💼 Antifragil Inversiones – 💱 Calculadora CEDEARs")
-st.caption("El cálculo aplica ajuste por canje (MEP/CCL). Se muestran valores teóricos en USD y en ARS.")
+st.caption("El cálculo aplica ajuste por canje (CCL/MEP). Se muestran valores teóricos en USD y en ARS.")
 
 # --------------------------
 # Config API y fuentes
@@ -164,9 +164,9 @@ def calcular_precio_cedear(ticker: str, ratios: dict):
     ccl, mep = get_ccl_mep()
     if price_usd == 0 or ratio == 0 or ccl == 0 or mep == 0:
         return price_usd, ratio, ccl, mep, None, None, None
-    canje = mep / ccl
+    canje = ccl / mep  # ✅ Corrección: ahora se calcula CCL / MEP
     precio_usd_canje = round((price_usd / ratio) * canje, 2)
-    precio_ars_canje = round(precio_usd_canje * ccl, 2)
+    precio_ars_canje = round(precio_usd_canje * mep, 2)
     return price_usd, ratio, ccl, mep, canje, precio_usd_canje, precio_ars_canje
 
 # --------------------------
@@ -205,7 +205,7 @@ if go:
   <hr>
   <p class="result-price">➡️ <b>Precio CEDEAR teórico USD:</b> {fmt(px_usd_canje)} USD</p>
   <p class="result-price">➡️ <b>Precio CEDEAR teórico ARS:</b> ${fmt(px_ars_canje)} ARS</p>
-  <div class="small-note">Canje MEP/CCL: {fmt(canje, 4)}</div>
+  <div class="small-note">Canje CCL/MEP: {fmt(canje, 4)}</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -244,4 +244,4 @@ else:
     )
 
 st.markdown("---")
-st.caption("Fuente ratios: BYMA (PDF). Precio subyacente: Yahoo Finance (intradiario si disponible). CCL y MEP: dolarapi.com. Cálculo teórico con ajuste por canje (MEP/CCL).")
+st.caption("Fuente ratios: BYMA (PDF). Precio subyacente: Yahoo Finance (intradiario si disponible). CCL y MEP: dolarapi.com. Cálculo teórico con ajuste por canje (CCL/MEP).")
